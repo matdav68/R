@@ -1,0 +1,358 @@
+---
+title: "World cup stats"
+output: html_document
+date: "2025-07-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(tidyr)
+```
+
+```{r}
+wc_matches <- read.csv("C:/Users/12152/Downloads/matches.csv")
+teams <- read.csv("C:/Users/12152/Downloads/teams.csv")
+```
+
+```{r}
+wc_matches_clean <- wc_matches %>%
+  select(
+    tournament_id, tournament_name, match_name, stage_name, group_stage, knockout_stage, home_team_name, away_team_name, score, home_team_score, away_team_score, extra_time, penalty_shootout, score_penalties, home_team_score_penalties, away_team_score_penalties, result, home_team_win, away_team_win, draw
+  )
+```
+
+```{r}
+wc_matches_clean <- wc_matches_clean %>%
+  # Add home confederation
+   left_join(
+    teams %>% select(team_name, confederation_code),
+    by = c("home_team_name" = "team_name")
+  ) %>%
+  rename(home_conf = confederation_code) %>%
+  
+  # Add away confederation
+  left_join(
+    teams %>% select(team_name, confederation_code),
+    by = c("away_team_name" = "team_name")
+  ) %>%
+  rename(away_conf = confederation_code)
+```
+
+```{r}
+# Australia changed confederation from Oceania to Asia in 2006
+# Israel only competed in the 1970 world cup and was apart of Asia when they participated
+wc_matches_clean <- wc_matches_clean %>%
+  mutate(
+    wc_year = as.numeric(str_extract(tournament_id, "\\d{4}")),
+    home_conf = ifelse(home_team_name == "Australia" & wc_year <= 2006, "OFC", home_conf),
+    away_conf = ifelse(away_team_name == "Australia" & wc_year <= 2006, "OFC", away_conf),
+    away_conf = ifelse(away_team_name == "Israel" & wc_year == 1970, "AFC", away_conf),
+    # West Germany competed between 1954 - 1990 world cups winning the tournament 3 times, with 36 wins, 14 draws, 12 losses, 131 goals for, and 77 goals against. For simplicity I will change West Germany to Germany
+    home_team_name = if_else(home_team_name == "West Germany", "Germany", home_team_name),
+    away_team_name = if_else(away_team_name == "West Germany", "Germany", away_team_name)
+  )
+```
+
+```{r}
+# Creating a new variable for the confederation pairing between 2 teams
+wc_matches_clean <- wc_matches_clean %>%
+  mutate(
+    conf_pair = ifelse(home_conf < away_conf,
+                         paste(home_conf, away_conf, sep = "-"),
+                         paste(away_conf, home_conf, sep = "-"))
+  )
+```
+
+```{r}
+wc_matches_clean <- wc_matches_clean %>%
+  mutate(
+    # Update results for penalty shootouts
+    home_team_win = if_else(penalty_shootout == 1, 0, home_team_win),
+    away_team_win = if_else(penalty_shootout == 1, 0, away_team_win),
+    draw          = if_else(penalty_shootout == 1, 1, draw),
+    
+    winner_team = case_when(
+      home_team_win == 1 ~ home_team_name,
+      away_team_win == 1 ~ away_team_name,
+      TRUE ~ NA_character_  # for draws
+    ),
+    winner_conf = case_when(
+      home_team_win == 1 ~ home_conf,
+      away_team_win == 1 ~ away_conf,
+      TRUE ~ NA_character_
+    ),
+
+    # Determine penalty shootout winners
+    pen_winner = if_else(
+      penalty_shootout == 1 & result == "home team win", home_team_name,
+      if_else(penalty_shootout == 1 & result == "away team", away_team_name, NA_character_)
+    ),
+
+    conf_pen_winner = if_else(
+      penalty_shootout == 1 & result == "home team win", home_conf,
+      if_else(penalty_shootout == 1 & result == "away team win", away_conf, NA_character_)
+    )
+  )
+```
+
+```{r}
+# Creating a database of only men's world cup matches
+wc_men <- wc_matches_clean %>%
+  filter(!str_detect(tournament_name, "Women's"))
+# Matches after the first group stage including second group stage matches
+# Does not exclude matches from 1934 World Cup since they are all knockouts
+past_first_stage <- wc_men %>%
+  filter(!str_detect(stage_name, regex("^group stage$", ignore_case = TRUE)))
+# Matches of only knockout games
+ko_matches <- past_first_stage %>%
+  filter(knockout_stage == 1)
+```
+
+```{r}
+# Summary of all head to head match ups between different confederations
+conf_summary <- wc_men %>%
+  group_by(conf_pair) %>%
+  reframe(
+    conf1 = str_split_fixed(conf_pair, "-", 2)[,1],
+    conf2 = str_split_fixed(conf_pair, "-", 2)[,2],
+    matches = n(),
+    
+    conf1_wins = sum(
+      (home_conf == conf1) * home_team_win +
+      (away_conf == conf1) * away_team_win
+    ),
+    conf2_wins = sum(
+      (home_conf == conf2) * home_team_win +
+      (away_conf == conf2) * away_team_win
+    ),
+    draws = sum(draw),
+    
+    conf1_goals = sum(
+      (home_conf == conf1) * home_team_score +
+      (away_conf == conf1) * away_team_score
+    ),
+    conf2_goals = sum(
+      (home_conf == conf2) * home_team_score +
+      (away_conf == conf2) * away_team_score
+    ),
+    
+    conf1_goals_per_game = conf1_goals / matches,
+    conf2_goals_per_game = conf2_goals / matches,
+    
+    # Confederation wins including penalty shootouts
+    conf1_wins_wp = conf1_wins + sum(conf_pen_winner == conf1, na.rm = TRUE),
+    conf2_wins_wp = conf2_wins + sum(conf_pen_winner == conf2, na.rm = TRUE)
+  ) %>%
+  mutate(
+    conf1_winrate = conf1_wins / matches,
+    conf2_winrate = conf2_wins / matches,
+    draw_rate = draws / matches,
+    conf1_win_wp_rate = conf1_wins_wp / matches,
+    conf2_win_wp_rate = conf2_wins_wp / matches
+  ) %>%
+  distinct()
+```
+
+```{r}
+conf_summary_inter <- conf_summary %>%
+  filter(conf1 != conf2)
+```
+
+```{r}
+country_table <- wc_men %>%
+  transmute(
+    team = home_team_name,
+    conf = home_conf,
+    wins = home_team_win,
+    draws = draw,
+    losses = if_else(home_team_win == 0 & draw == 0, 1, 0),
+    goals = home_team_score,
+    ga = away_team_score,
+  ) %>%
+  bind_rows(
+    # Away team stats
+    wc_men %>%
+      transmute(
+        team = away_team_name,
+        conf = away_conf,
+        wins = away_team_win,
+        draws = draw,
+        losses = if_else(away_team_win == 0 & draw == 0, 1, 0),
+        goals = away_team_score,
+        ga = home_team_score,
+      )
+  ) %>%
+  # Aggregate per team
+  group_by(team, conf) %>%
+  summarise(
+    matches = sum(wins, draws, losses),
+    wins = sum(wins),
+    draws = sum(draws),
+    losses = sum(losses),
+    goals = sum(goals),
+    ga = sum(ga),
+    .groups = "drop",
+  ) %>%
+  mutate(
+    gd = goals - ga,
+    pts = wins * 3 + draws,
+    win_rate = wins/matches
+  ) %>%
+  arrange(desc(pts), desc(gd), desc(goals))
+```
+
+```{r}
+conf_table <- wc_men %>%
+  filter(home_conf != away_conf) %>%
+  
+  # Combine home and away perspectives
+  mutate(
+    home_team_win = as.numeric(home_team_win),
+    away_team_win = as.numeric(away_team_win),
+    draw = as.numeric(draw),
+    home_team_score = as.numeric(home_team_score),
+    away_team_score = as.numeric(away_team_score)
+  ) %>%
+  
+  # Create a "team perspective" version
+  mutate(
+    team = home_team_name,
+    conf_team = home_conf,
+    goals_for = home_team_score,
+    goals_against = away_team_score,
+    win = home_team_win,
+    loss = away_team_win
+  ) %>%
+  select(team, conf_team, goals_for, goals_against, win, draw, loss) %>%
+  
+  bind_rows(
+    wc_men %>%
+      filter(home_conf != away_conf) %>%  # apply same filter again
+      mutate(
+        home_team_win = as.numeric(home_team_win),
+        away_team_win = as.numeric(away_team_win),
+        draw = as.numeric(draw),
+        home_team_score = as.numeric(home_team_score),
+        away_team_score = as.numeric(away_team_score),
+        team = away_team_name,
+        conf_team = away_conf,
+        goals_for = away_team_score,
+        goals_against = home_team_score,
+        win = away_team_win,
+        loss = home_team_win
+      ) %>%
+      select(team, conf_team, goals_for, goals_against, win, draw, loss)
+  ) %>%
+  
+  # Summarize by confederation
+  group_by(conf = conf_team) %>%
+  summarise(
+    matches = n(),
+    wins = sum(win, na.rm = TRUE),
+    draws = sum(draw, na.rm = TRUE),
+    losses = sum(loss, na.rm = TRUE),
+    goals = sum(goals_for, na.rm = TRUE),
+    ga = sum(goals_against, na.rm = TRUE),
+    gd = goals - ga,
+    win_rate = wins/matches,
+    goals_per_game = round(goals / matches, 2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(win_rate))
+```
+
+```{r}
+conf_heatmap <- conf_summary_inter %>%
+  select(conf1, conf2, conf1_winrate, conf2_winrate) %>%
+  rename(winrate = conf1_winrate) %>%
+  bind_rows(
+    conf_summary_inter %>%
+      select(conf1 = conf2, conf2 = conf1, winrate = conf2_winrate)
+  ) %>%
+  distinct(conf1, conf2, .keep_all = TRUE)
+
+all_confs <- sort(unique(c(conf_heatmap$conf1, conf_heatmap$conf2)))
+
+conf_heatmap <- expand_grid(conf1 = all_confs, conf2 = all_confs) %>%
+  left_join(conf_heatmap, by = c("conf1", "conf2")) %>%
+  mutate(winrate = ifelse(conf1 == conf2, NA, winrate))
+
+# Plot heatmap
+ggplot(conf_heatmap, aes(x = conf1, y = conf2, fill = winrate)) +
+  geom_tile(color = "white") +
+  geom_text(
+    aes(label = ifelse(!is.na(winrate),
+                       percent(winrate, accuracy = 0.1),
+                       "")),
+    color = "black", size = 3
+  ) +
+  scale_fill_gradient(
+    low = "#f9f9f9", high = "#0072B2",
+    name = "Win rate", na.value = "white"
+  ) +
+  labs(
+    title = "Confederation vs Confederation Win Rates (Men's World Cup)",
+    x = "Confederation",
+    y = "Opponent Confederation"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+```
+```{r}
+wc_inter <- wc_men %>%
+  filter(home_conf != away_conf)
+
+conf_results <- wc_inter %>%
+  mutate(
+    winner_conf = case_when(
+      home_team_win == 1 ~ home_conf,
+      away_team_win == 1 ~ away_conf,
+      draw == 1 ~ "Draw",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(winner_conf)) %>%
+  count(home_conf, away_conf, winner_conf)
+```
+
+```{r}
+pairwise_results <- combn(conf_table$conf, 2, function(x){
+  conf1 <- conf_table %>% filter(conf == x[1])
+  conf2 <- conf_table %>% filter(conf == x[2])
+  
+  # Number of wins and matches
+  wins <- c(conf1$wins, conf2$wins)
+  n <- c(conf1$matches, conf2$matches)
+  
+  test <- prop.test(wins, n)
+  data.frame(conf1 = x[1], conf2 = x[2], p_value = test$p.value)
+}, simplify = FALSE) %>% bind_rows()
+
+pairwise_results
+
+```
+```{r}
+library(dendextend)
+library(tibble)
+
+# Use win rate and goals per match as features
+conf_features <- conf_table %>%
+  select(conf, win_rate, goals_per_game, gd) %>%
+  column_to_rownames("conf")
+
+# Compute distance and hierarchical clustering
+dist_mat <- dist(conf_features)
+hc <- hclust(dist_mat, method = "ward.D2")
+
+# Plot dendrogram
+plot(hc, main = "Confederation Clustering by Performance", ylab = "Distance")
+```
