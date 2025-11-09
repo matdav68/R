@@ -112,11 +112,13 @@ past_first_stage <- wc_men %>%
 # Matches of only knockout games
 ko_matches <- past_first_stage %>%
   filter(knockout_stage == 1)
+wc_inter <- wc_men %>%
+  filter(home_conf != away_conf)
 ```
 
 ```{r}
 # Summary of all head to head match ups between different confederations
-conf_summary <- wc_men %>%
+conf_summary <- wc_inter %>%
   group_by(conf_pair) %>%
   reframe(
     conf1 = str_split_fixed(conf_pair, "-", 2)[,1],
@@ -160,11 +162,6 @@ conf_summary <- wc_men %>%
 ```
 
 ```{r}
-conf_summary_inter <- conf_summary %>%
-  filter(conf1 != conf2)
-```
-
-```{r}
 country_table <- wc_men %>%
   transmute(
     team = home_team_name,
@@ -205,6 +202,7 @@ country_table <- wc_men %>%
     win_rate = wins/matches
   ) %>%
   arrange(desc(pts), desc(gd), desc(goals))
+country_table
 ```
 
 ```{r}
@@ -265,14 +263,15 @@ conf_table <- wc_men %>%
     .groups = "drop"
   ) %>%
   arrange(desc(win_rate))
+conf_table
 ```
 
 ```{r}
-conf_heatmap <- conf_summary_inter %>%
+conf_heatmap <- conf_summary %>%
   select(conf1, conf2, conf1_winrate, conf2_winrate) %>%
   rename(winrate = conf1_winrate) %>%
   bind_rows(
-    conf_summary_inter %>%
+    conf_summary %>%
       select(conf1 = conf2, conf2 = conf1, winrate = conf2_winrate)
   ) %>%
   distinct(conf1, conf2, .keep_all = TRUE)
@@ -307,22 +306,6 @@ ggplot(conf_heatmap, aes(x = conf1, y = conf2, fill = winrate)) +
     panel.grid = element_blank()
   )
 ```
-```{r}
-wc_inter <- wc_men %>%
-  filter(home_conf != away_conf)
-
-conf_results <- wc_inter %>%
-  mutate(
-    winner_conf = case_when(
-      home_team_win == 1 ~ home_conf,
-      away_team_win == 1 ~ away_conf,
-      draw == 1 ~ "Draw",
-      TRUE ~ NA_character_
-    )
-  ) %>%
-  filter(!is.na(winner_conf)) %>%
-  count(home_conf, away_conf, winner_conf)
-```
 
 ```{r}
 pairwise_results <- combn(conf_table$conf, 2, function(x){
@@ -338,21 +321,103 @@ pairwise_results <- combn(conf_table$conf, 2, function(x){
 }, simplify = FALSE) %>% bind_rows()
 
 pairwise_results
-
 ```
+
 ```{r}
-library(dendextend)
-library(tibble)
+ggplot(conf_table, aes(x = goals_per_game, y = win_rate, label = conf, color = conf)) +
+  geom_point(size = 5, alpha = 0.8) +
+  geom_text(vjust = -1, size = 4.2) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+    limits = c(0, max(conf_table$win_rate) * 1.15)) +
+  scale_x_continuous(limits = c(0, max(conf_table$goals_per_game) * 1.1)) +
+  labs(
+    title = "Confederation Performance at the World Cup",
+    subtitle = "Win Rate vs. Goals Per Game (Inter-Confederation Matches Only)",
+    x = "Goals Per Game",
+    y = "Win Percentage",
+    caption = "Data: FIFA World Cup Matches | Analysis in R"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(color = "gray40")
+  )
+```
 
-# Use win rate and goals per match as features
-conf_features <- conf_table %>%
-  select(conf, win_rate, goals_per_game, gd) %>%
-  column_to_rownames("conf")
+```{r}
+conf_scaled <- conf_table %>%
+  select(conf, win_rate, goals_per_game, ga) %>%   # you can include more metrics if you want
+  column_to_rownames("conf")                       # make conf names row labels
 
-# Compute distance and hierarchical clustering
-dist_mat <- dist(conf_features)
-hc <- hclust(dist_mat, method = "ward.D2")
+# Scale data so all features have equal weight
+conf_scaled <- scale(conf_scaled)
+
+# Perform hierarchical clustering using Euclidean distance and Ward's method
+dist_mat <- dist(conf_scaled, method = "euclidean")
+hclust_model <- hclust(dist_mat, method = "ward.D2")
 
 # Plot dendrogram
-plot(hc, main = "Confederation Clustering by Performance", ylab = "Distance")
+plot(hclust_model,
+     main = "Hierarchical Clustering of Confederation Performance",
+     xlab = "Confederation",
+     sub = "",
+     ylab = "Distance")
+
+# Add cluster cut lines (for example, 3 clusters)
+rect.hclust(hclust_model, k = 3, border = "blue")
+
+# Get cluster assignments
+clusters <- cutree(hclust_model, k = 3)
+
+# Attach cluster info back to the conf_table
+conf_clustered <- conf_table %>%
+  mutate(cluster = clusters[conf])
+
+conf_clustered
+```
+```{r}
+conf_summary_ko <- ko_matches %>%
+  group_by(conf_pair) %>%
+  reframe(
+    conf1 = str_split_fixed(conf_pair, "-", 2)[,1],
+    conf2 = str_split_fixed(conf_pair, "-", 2)[,2],
+    matches = n(),
+    
+    conf1_wins = sum(
+      (home_conf == conf1) * home_team_win +
+      (away_conf == conf1) * away_team_win
+    ),
+    conf2_wins = sum(
+      (home_conf == conf2) * home_team_win +
+      (away_conf == conf2) * away_team_win
+    ),
+    draws = sum(draw),
+    
+    conf1_goals = sum(
+      (home_conf == conf1) * home_team_score +
+      (away_conf == conf1) * away_team_score
+    ),
+    conf2_goals = sum(
+      (home_conf == conf2) * home_team_score +
+      (away_conf == conf2) * away_team_score
+    ),
+    
+    conf1_goals_per_game = conf1_goals / matches,
+    conf2_goals_per_game = conf2_goals / matches,
+    
+    # Confederation wins including penalty shootouts
+    conf1_wins_wp = conf1_wins + sum(conf_pen_winner == conf1, na.rm = TRUE),
+    conf2_wins_wp = conf2_wins + sum(conf_pen_winner == conf2, na.rm = TRUE)
+  ) %>%
+  mutate(
+    conf1_winrate = conf1_wins / matches,
+    conf2_winrate = conf2_wins / matches,
+    draw_rate = draws / matches,
+    conf1_win_wp_rate = conf1_wins_wp / matches,
+    conf2_win_wp_rate = conf2_wins_wp / matches
+  ) %>%
+  distinct()
+conf_summary_ko
+```
 ```
